@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hand AR</title>
+  <style>
+    html, body { margin:0; height:100%; overflow:hidden; background:#000; font-family:system-ui, -apple-system, Segoe UI, Roboto, Arial; }
+    #stage { position:fixed; inset:0; overflow:hidden; }
+    #video {
+      position:absolute; inset:0;
+      width:100%; height:100%;
+      object-fit:cover;
+      background:#000;
+      transform-origin:center center;
+    }
+    #gl {
+      position:absolute; inset:0;
+      width:100%; height:100%;
+      pointer-events:none;
+    }
+
+    #status {
+      position:fixed; left:12px; top:12px; z-index:50;
+      color:rgba(215,225,255,.92);
+      background:rgba(0,0,0,.28);
+      border:1px solid rgba(255,255,255,.10);
+      padding:8px 10px; border-radius:12px;
+      backdrop-filter: blur(6px);
+      max-width: 560px;
+      line-height:1.35;
+      font-weight:650;
+      user-select:none;
+    }
+
+    #controls {
+      position:fixed; left:12px; bottom:12px; z-index:60;
+      display:flex; gap:10px; align-items:center;
+    }
+    .btn{
+      cursor:pointer; border-radius:12px;
+      border:1px solid rgba(255,255,255,.18);
+      background:rgba(255,255,255,.10);
+      color:#d7e1ff; padding:10px 12px; font-weight:800; user-select:none;
+    }
+    .btn:hover{ background:rgba(255,255,255,.14); }
+  </style>
+</head>
+<body>
+  <div id="status">Status: requesting camera permission…</div>
+
+  <div id="controls">
+    <button id="invertBtn" class="btn">invest camera</button>
+  </div>
+
+  <div id="stage">
+    <video id="video" playsinline muted></video>
+    <canvas id="gl"></canvas>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1675466862/camera_utils.js"></script>
+
+  <script>
+    const statusEl = document.getElementById("status");
+    const videoEl  = document.getElementById("video");
+    const glCanvas = document.getElementById("gl");
+
+    const invertBtn = document.getElementById("invertBtn");
+
+    let isInverted = false;
+    function applyVideoTransform(){ videoEl.style.transform = isInverted ? "scaleX(-1)" : "scaleX(1)"; }
+    applyVideoTransform();
+    invertBtn.addEventListener("click", () => { isInverted = !isInverted; applyVideoTransform(); });
+
+    // --- Three.js overlay ---
+    const renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias:true, alpha:true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio));
+    renderer.setClearColor(0x000000, 0);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.25;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, 1, 0.01, 100);
+    camera.position.set(0, 0, 2.2);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.70));
+    const dir = new THREE.DirectionalLight(0xffffff, 0.95);
+    dir.position.set(2, 3, 2);
+    scene.add(dir);
+
+    // Hand rig
+    const BONES = [
+      [0,1],[1,2],[2,3],[3,4],
+      [0,5],[5,6],[6,7],[7,8],
+      [0,9],[9,10],[10,11],[11,12],
+      [0,13],[13,14],[14,15],[15,16],
+      [0,17],[17,18],[18,19],[19,20],
+      [5,9],[9,13],[13,17]
+    ];
+
+    function jointRadius(i){
+      if (i === 0) return 0.032;
+      if ([1,5,9,13,17].includes(i)) return 0.028;
+      if ([4,8,12,16,20].includes(i)) return 0.021;
+      return 0.024;
+    }
+    function boneThickness(a,b){
+      const tip = [4,8,12,16,20];
+      const mid = [3,7,11,15,19];
+      if (tip.includes(a) || tip.includes(b)) return 0.010;
+      if (mid.includes(a) || mid.includes(b)) return 0.012;
+      if (a === 0 || b === 0) return 0.016;
+      return 0.013;
+    }
+
+    function setCylinderBetween(cyl, a, b){
+      const d = new THREE.Vector3().subVectors(b, a);
+      const len = d.length();
+      if (len < 1e-6) { cyl.visible = false; return; }
+      cyl.visible = true;
+      const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+      cyl.position.copy(mid);
+      const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), d.clone().normalize());
+      cyl.quaternion.copy(q);
+      cyl.scale.set(1, len, 1);
+    }
+
+    function makeHand(colorA, colorB, palmColor){
+      const group = new THREE.Group();
+      scene.add(group);
+
+      const jointMat = new THREE.MeshStandardMaterial({ color: colorA, roughness: 0.35, metalness: 0.06 });
+      const boneMat  = new THREE.MeshStandardMaterial({ color: colorB, roughness: 0.55, metalness: 0.03 });
+      const palmMat  = new THREE.MeshStandardMaterial({
+        color: palmColor, roughness: 0.55, metalness: 0.02,
+        transparent: true, opacity: 0.24, side: THREE.DoubleSide
+      });
+
+      const joints = [];
+      for (let i=0;i<21;i++){
+        const m = new THREE.Mesh(new THREE.SphereGeometry(jointRadius(i), 18, 14), jointMat);
+        group.add(m);
+        joints.push(m);
+      }
+
+      const bones = BONES.map(([a,b])=>{
+        const r = boneThickness(a,b);
+        const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r*1.15, 1, 12), boneMat);
+        group.add(c);
+        return {a,b,mesh:c};
+      });
+
+      const palmGeo = new THREE.BufferGeometry();
+      const palmVerts = new Float32Array(18);
+      palmGeo.setAttribute("position", new THREE.BufferAttribute(palmVerts, 3));
+      palmGeo.setIndex([0,1,2, 0,2,3, 0,3,4, 1,2,3, 1,3,4]);
+      palmGeo.computeVertexNormals();
+      const palmMesh = new THREE.Mesh(palmGeo, palmMat);
+      group.add(palmMesh);
+
+      const target = Array.from({length:21}, ()=>new THREE.Vector3());
+      let has = false;
+      let zRef = 0;
+
+      return { group, joints, bones, palmGeo, palmMesh, target, get has(){return has;}, set has(v){has=v;}, get zRef(){return zRef;}, set zRef(v){zRef=v;} };
+    }
+
+    const handA = makeHand(0xa7f3d0, 0x93c5fd, 0xfde68a);
+    const handB = makeHand(0xf9a8d4, 0x60a5fa, 0xa7f3d0);
+
+    function updatePalm(hand){
+      const p = hand.palmGeo.attributes.position.array;
+
+      const wrist = hand.joints[0].position;
+      const iMcp  = hand.joints[5].position;
+      const mMcp  = hand.joints[9].position;
+      const rMcp  = hand.joints[13].position;
+      const pMcp  = hand.joints[17].position;
+
+      const v0 = wrist.clone().lerp(mMcp, 0.35);
+      const v1 = iMcp.clone().lerp(mMcp, 0.2);
+      const v2 = mMcp.clone();
+      const v3 = rMcp.clone().lerp(mMcp, 0.2);
+      const v4 = pMcp.clone().lerp(rMcp, 0.25);
+
+      const verts = [v0,v1,v2,v3,v4];
+      for (let i=0;i<5;i++){
+        p[i*3+0]=verts[i].x;
+        p[i*3+1]=verts[i].y;
+        p[i*3+2]=verts[i].z;
+      }
+      hand.palmGeo.attributes.position.needsUpdate = true;
+      hand.palmGeo.computeVertexNormals();
+    }
+
+    // TRUE AR mapping: screen landmark -> world point via ray to plane (exact size/position)
+    const _raycaster = new THREE.Raycaster();
+    const _ndc = new THREE.Vector2();
+    const _plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0); // z = 0 plane
+    const _hit = new THREE.Vector3();
+    const _camDir = new THREE.Vector3();
+
+    function screenToWorldOnPlane(x01, y01){
+      const nx = x01 * 2 - 1;
+      const ny = 1 - y01 * 2;
+      _ndc.set(nx, ny);
+      _raycaster.setFromCamera(_ndc, camera);
+      _raycaster.ray.intersectPlane(_plane, _hit);
+      return _hit.clone();
+    }
+
+    function applyLandmarksAR(hand, lm){
+      const worldPts = new Array(21);
+
+      for (let i = 0; i < 21; i++){
+        let x = lm[i].x;
+        let y = lm[i].y;
+        if (isInverted) x = 1 - x;
+        worldPts[i] = screenToWorldOnPlane(x, y);
+      }
+
+      const refLen = worldPts[0].distanceTo(worldPts[9]); // wrist -> middle MCP
+      camera.getWorldDirection(_camDir);
+      const towardCamera = _camDir.clone().negate();
+
+      const depthScale = 0.55;
+
+      for (let i = 0; i < 21; i++){
+        const z = (lm[i].z || 0);
+        const depth = (-z) * refLen * depthScale;
+        hand.target[i].copy(worldPts[i]).add(towardCamera.clone().multiplyScalar(depth));
+      }
+
+      hand.has = true;
+    }
+
+    // smoothing
+    let smooth = 0.34;
+    let zDamp  = 0.65;
+
+    const _tmp = new THREE.Vector3();
+    function stepHand(hand){
+      if (!hand.has){
+        hand.group.visible = false;
+        return;
+      }
+      hand.group.visible = true;
+
+      for (let i = 0; i < 21; i++){
+        _tmp.copy(hand.target[i]);
+
+        if (i === 0) hand.zRef = hand.zRef * zDamp + _tmp.z * (1 - zDamp);
+        const zFixed = _tmp.z * (1 - zDamp) + hand.zRef * zDamp;
+
+        hand.joints[i].position.lerp(new THREE.Vector3(_tmp.x, _tmp.y, zFixed), smooth);
+      }
+
+      for (const b of hand.bones) setCylinderBetween(b.mesh, hand.joints[b.a].position, hand.joints[b.b].position);
+      updatePalm(hand);
+
+      hand.group.position.set(0,0,0);
+      hand.palmMesh.visible = true;
+    }
+
+    // --- MediaPipe ---
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+      selfieMode: false
+    });
+
+    hands.onResults((results) => {
+      const all = results.multiHandLandmarks || [];
+
+      handA.has = false;
+      handB.has = false;
+
+      if (all.length === 0){
+        statusEl.textContent = "Status: no hand detected";
+        return;
+      }
+
+      statusEl.textContent = "Status: tracking hand";
+
+      applyLandmarksAR(handA, all[0]);
+
+      if (all.length >= 2){
+        applyLandmarksAR(handB, all[1]);
+      }
+    });
+
+    async function startCamera(){
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 1280, height: 720, facingMode:"user" },
+        audio: false
+      });
+
+      videoEl.srcObject = stream;
+      await videoEl.play();
+
+      const cam = new Camera(videoEl, {
+        onFrame: async () => { await hands.send({ image: videoEl }); },
+        width: 1280,
+        height: 720
+      });
+      cam.start();
+
+      statusEl.textContent = "Status: show your hands to the camera";
+    }
+
+    startCamera().catch((err) => {
+      console.error(err);
+      statusEl.textContent = "Status: camera blocked (allow permission / use https)";
+    });
+
+    function resize(){
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+    window.addEventListener("resize", resize);
+    resize();
+
+    function animate(){
+      requestAnimationFrame(animate);
+      stepHand(handA);
+      stepHand(handB);
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
