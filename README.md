@@ -1,22 +1,22 @@
-Basic 3D Hand Tracking (Web AR)
+## Basic 3D Hand Tracking (Web AR)
 A real-time browser-based augmented reality hand tracking system using only a webcam.
 The program detects your hand, tracks 21 key points, reconstructs a 3D skeletal model, and overlays it onto your real hand with matching size and position in real time. Everything runs locally in the browser — no downloads required.
 
-_
+___
 **How it works**
 *MediaPipe detects hand key points from the camera feed
 *The 2D coordinates are projected into 3D space
 *A 3D hand skeleton is rendered using Three.js
 *Depth estimation + smoothing keeps the hand stable and aligned
 
-_
+___
 **Tech Stack**
 *JavaScript
 *Three.js
 *MediaPipe Hands
 *WebGL
 
-_
+___
 **Run locally**
 
 **Clone the repo:**
