@@ -4,17 +4,17 @@ The program detects your hand, tracks 21 key points, reconstructs a 3D skeletal 
 
 ___
 **How it works**
-*MediaPipe detects hand key points from the camera feed
-*The 2D coordinates are projected into 3D space
-*A 3D hand skeleton is rendered using Three.js
-*Depth estimation + smoothing keeps the hand stable and aligned
+* MediaPipe detects hand key points from the camera feed
+* The 2D coordinates are projected into 3D space
+* A 3D hand skeleton is rendered using Three.js
+* Depth estimation + smoothing keeps the hand stable and aligned
 
 ___
 **Tech Stack**
-*JavaScript
-*Three.js
-*MediaPipe Hands
-*WebGL
+* JavaScript
+* Three.js
+* MediaPipe Hands
+* WebGL
 
 ___
 **Run locally**
